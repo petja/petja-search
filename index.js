@@ -8,16 +8,8 @@ console.log(`
 `)
 
 const emoji = require('emojify-tag')
-const redis = require('redis')
 const crypto = require('crypto')
-const { promisifyAll } = require('bluebird')
 const _ = require('lodash')
-
-promisifyAll(redis.RedisClient.prototype)
-promisifyAll(redis.Multi.prototype)
-
-const redisClient = redis.createClient()
-redisClient.on('error', console.error)
 
 const sortQueryKeys = query =>
     Object.keys(query)
@@ -41,14 +33,16 @@ const createQueryHash = query => {
 
 const search = async (query = {}, opts = {}, _internals = {}) => {
     const { rebuild, facets = [] } = opts
-    const { withoutProps = [], write = null } = _internals
+    const { withoutProps = [], write = null, redisClient } = _internals
 
     const tempQuery = getObjWithoutSpecificKeys(query, withoutProps)
     const facetKey = { query, facets }
 
     // Try to find matching cache item
-    const faceted = _internals.faceted || (await readCache('facets', facetKey))
-    const cacheMatch = write || (await readCache('search', tempQuery))
+    const faceted =
+        _internals.faceted || (await readCache('facets', facetKey, redisClient))
+    const cacheMatch =
+        write || (await readCache('search', tempQuery, redisClient))
 
     // If there isn't cache hit, remove properties
     // one by one to broaden search
@@ -61,7 +55,7 @@ const search = async (query = {}, opts = {}, _internals = {}) => {
             )
 
             await rebuild().then(hits => {
-                return writeCache('search', {}, hits)
+                return writeCache('search', {}, hits, redisClient)
             })
 
             return search(query, opts, _internals)
@@ -95,8 +89,8 @@ const search = async (query = {}, opts = {}, _internals = {}) => {
 
         const facetObj = faceted || reduceFacets(facets, hits)
 
-        await writeCache('search', newQuery, hits)
-        await writeCache('facets', facetKey, facetObj)
+        await writeCache('search', newQuery, hits, redisClient)
+        await writeCache('facets', facetKey, facetObj, redisClient)
 
         return search(query, opts, {
             ..._internals,
@@ -153,7 +147,7 @@ const getObjWithoutSpecificKeys = (obj = {}, withoutProps = []) =>
             {}
         )
 
-const readCache = (namespace, query) => {
+const readCache = (namespace, query, redisClient) => {
     const ordered = sortQueryKeys(query)
     const hash = createQueryHash(ordered)
 
@@ -166,7 +160,7 @@ const readCache = (namespace, query) => {
     return redisClient.getAsync(`${namespace}:${hash}`)
 }
 
-const writeCache = async (namespace, query, hits) => {
+const writeCache = async (namespace, query, hits, redisClient) => {
     const ordered = sortQueryKeys(query)
     const hash = createQueryHash(ordered)
 
@@ -178,7 +172,10 @@ const writeCache = async (namespace, query, hits) => {
 
     const key = `${namespace}:${hash}`
     await redisClient.setAsync(key, JSON.stringify(hits))
-    await redisClient.expireAsync(key, 900)
+    await redisClient.expireAsync(key, 1200)
 }
 
-module.exports = { search }
+const PetjaSearch = redisClient => (query, opts) =>
+    search(query, opts, { redisClient })
+
+module.exports = PetjaSearch
