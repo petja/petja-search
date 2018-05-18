@@ -39,12 +39,16 @@ const createQueryHash = query => {
     return hash.digest('hex')
 }
 
-const search = async (query = {}, internals, rebuildCache) => {
-    const { withoutProps = [], write = null } = internals
+const search = async (query = {}, opts = {}, _internals = {}) => {
+    const { rebuild, facets = [] } = opts
+    const { withoutProps = [], write = null } = _internals
+
     const tempQuery = getObjWithoutSpecificKeys(query, withoutProps)
+    const facetKey = { query, facets }
 
     // Try to find matching cache item
-    const cacheMatch = write ? write : await getMatch(tempQuery)
+    const faceted = _internals.faceted || (await readCache('facets', facetKey))
+    const cacheMatch = write || (await readCache('search', tempQuery))
 
     // If there isn't cache hit, remove properties
     // one by one to broaden search
@@ -56,11 +60,11 @@ const search = async (query = {}, internals, rebuildCache) => {
                 emoji`:arrows_counterclockwise: Need full refresh ...\n`
             )
 
-            await rebuildCache().then(hits => {
-                return writeCache({}, hits)
+            await rebuild().then(hits => {
+                return writeCache('search', {}, hits)
             })
 
-            return search(query, internals, rebuildCache)
+            return search(query, opts, _internals)
         }
 
         const lastKey = _.last(Object.keys(tempQuery))
@@ -69,15 +73,11 @@ const search = async (query = {}, internals, rebuildCache) => {
             emoji`:no_entry_sign: Cache not found, trying search without "${lastKey}"\n`
         )
 
-        return search(
-            query,
-            {
-                ...internals,
-                withoutProps: [...withoutProps, lastKey],
-                write: null,
-            },
-            rebuildCache
-        )
+        return search(query, opts, {
+            ..._internals,
+            withoutProps: [...withoutProps, lastKey],
+            write: null,
+        })
     }
 
     const parsed =
@@ -93,17 +93,46 @@ const search = async (query = {}, internals, rebuildCache) => {
         const newWithout = withoutProps.slice(0, -1)
         const newQuery = getObjWithoutSpecificKeys(query, newWithout)
 
-        await writeCache(newQuery, hits)
+        const facetObj = faceted || reduceFacets(facets, hits)
 
-        return search(
-            query,
-            { ...internals, withoutProps: newWithout, write: hits },
-            rebuildCache
-        )
+        await writeCache('search', newQuery, hits)
+        await writeCache('facets', facetKey, facetObj)
+
+        return search(query, opts, {
+            ..._internals,
+            withoutProps: newWithout,
+            write: hits,
+            faceted: facetObj,
+        })
     }
 
-    return parsed
+    return {
+        hits: parsed,
+        nbHits: parsed.length,
+        facets: typeof faceted === 'string' ? JSON.parse(faceted) : faceted,
+    }
 }
+
+const reduceFacets = (facets, hits) =>
+    hits.reduce((acc, hit) => {
+        return facets.reduce((acc2, facet) => {
+            const fv = hit[facet]
+            if (!acc2[facet]) acc2[facet] = {}
+
+            if (Array.isArray(fv)) {
+                acc2[facet] = fv.reduce((acc3, arrItem) => {
+                    if (!acc3[arrItem]) acc3[arrItem] = 0
+                    acc3[arrItem]++
+                    return acc3
+                }, acc2[facet])
+            } else if (['boolean', 'number', 'string'].includes(typeof fv)) {
+                if (!acc2[facet][fv]) acc2[facet][fv] = 0
+                acc2[facet][fv]++
+            }
+
+            return acc2
+        }, acc)
+    }, {})
 
 const runFilter = (before, filterName, filterValue) => {
     console.log(emoji`:sunglasses: Filtering`, { filterName, filterValue })
@@ -124,21 +153,7 @@ const getObjWithoutSpecificKeys = (obj = {}, withoutProps = []) =>
             {}
         )
 
-/*const getCacheSteps = query => {
-    const allKeys = Object.keys(query).sort()
-
-    return allKeys.map((item, index) =>
-        allKeys.slice(0, index + 1).reduce(
-            (acc, key) => ({
-                ...acc,
-                [key]: query[key],
-            }),
-            {}
-        )
-    )
-}*/
-
-const getMatch = query => {
+const readCache = (namespace, query) => {
     const ordered = sortQueryKeys(query)
     const hash = createQueryHash(ordered)
 
@@ -148,22 +163,22 @@ const getMatch = query => {
         '\n'
     )
 
-    return redisClient.getAsync(`cached_search:${hash}`)
+    return redisClient.getAsync(`${namespace}:${hash}`)
 }
 
-const writeCache = async (query, hits) => {
+const writeCache = async (namespace, query, hits) => {
     const ordered = sortQueryKeys(query)
     const hash = createQueryHash(ordered)
 
     console.log(
-        emoji`:pencil2: Writing ${
-            hits.length
+        emoji`:floppy_disk: Writing ${
+            Object.keys(hits).length
         } rows to cache :key: ${hash.substr(0, 8)}\n`
     )
 
-    const key = `cached_search:${hash}`
+    const key = `${namespace}:${hash}`
     await redisClient.setAsync(key, JSON.stringify(hits))
-    await redisClient.expireAsync(key, 60)
+    await redisClient.expireAsync(key, 900)
 }
 
 module.exports = { search }

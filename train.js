@@ -46,7 +46,7 @@ const pushTrains = async () => {
             timeTableRows[timeTableRows.length - 1].stationShortCode
 
         return {
-            objectID: trainNumber,
+            objectID: [departureDate, trainNumber].join('/'),
             departureDate,
             timetableType,
             trainNumber,
@@ -61,14 +61,19 @@ const pushTrains = async () => {
     })
 }
 
-const query = {
-    cancelled: true,
-    trainType: 'T',
-}
+const args = process.argv.splice(process.execArgv.length + 2)
+const query = JSON.parse(args[0].trim())
 
-search(query, {}, pushTrains)
-    .then(items => {
-        console.log(`\n${items.length} results`)
-        //console.log(items.slice(0, 3))
+search(query, {
+    rebuild: pushTrains,
+    facets: ['commuterLineID', 'trainType', 'viaStations'],
+})
+    .then(({ nbHits, facets }) => {
+        console.log(
+            require('util').inspect(
+                { nbHits, facets },
+                { colors: true, depth: 2 }
+            )
+        )
     })
     .catch(console.error)
